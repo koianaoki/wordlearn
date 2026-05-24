@@ -24,6 +24,10 @@ type DictionaryResult = {
 // アプリ起動中に内容が変わらないため、定数として保持する。
 const ALL_WORDS = words as WordEntry[];
 
+// スワイプ成立に必要な距離。
+// 以前より長めにして、誤操作を減らす。
+const SWIPE_THRESHOLD = 110;
+
 // ランダムに単語インデックスを返す関数。
 // 直前と同じ単語を避けたいので exclude を受け取り、
 // 一致した場合は再抽選する。
@@ -94,11 +98,27 @@ function App() {
   const [dictionary, setDictionary] = createSignal<DictionaryResult | null>(null);
   // 裏面表示時のAPI通信中フラグ。
   const [loading, setLoading] = createSignal(false);
-  // スワイプ開始位置（x座標）。
+
+  // スワイプ開始位置（x座標）と現在位置との差分。
+  // 差分はカードの見た目（傾き・平行移動）と、スワイプ進捗表示に使う。
   const [startX, setStartX] = createSignal<number | null>(null);
+  const [dragDeltaX, setDragDeltaX] = createSignal(0);
+
+  // 「いまスワイプ操作中か」「今回のポインタ操作でスワイプ成立済みか」を保持。
+  // tap判定と競合しやすいので分離して管理し、裏面表示中でも確実にスワイプ優先にする。
+  const [isDragging, setIsDragging] = createSignal(false);
+  const [didSwipeOnThisPointer, setDidSwipeOnThisPointer] = createSignal(false);
 
   // 現在インデックスから表示単語を導出。
   const currentWord = createMemo(() => ALL_WORDS[currentIndex()]);
+
+  // 表示するカード移動量は、極端に遠くまで引っ張っても見た目が破綻しないよう上限を設ける。
+  const cardTranslateX = createMemo(() => Math.max(-140, Math.min(140, dragDeltaX())));
+  // 左右に引いた方向へ軽く回転させ、「ページをめくっている感」を強める。
+  const cardRotateDeg = createMemo(() => cardTranslateX() / 14);
+  // 進捗率は 0.0〜1.0 に丸め、しきい値到達の判定にも使う。
+  const swipeProgress = createMemo(() => Math.min(Math.abs(dragDeltaX()) / SWIPE_THRESHOLD, 1));
+  const reachedSwipeThreshold = createMemo(() => swipeProgress() >= 1);
 
   // 現在単語の辞書情報をロードする。
   const loadWordDetails = async () => {
@@ -122,6 +142,12 @@ function App() {
   // タップ時に表裏を切り替える。
   // 裏面へ遷移する瞬間のみ辞書APIを呼び出す（不要な再取得防止）。
   const onFlip = async () => {
+    // 直前のポインタ操作でスワイプが成立した場合、clickで裏返さない。
+    // これで「スワイプしたのに翻訳表示へ切り替わる」誤動作を防ぐ。
+    if (didSwipeOnThisPointer()) {
+      return;
+    }
+
     const nextFlipped = !flipped();
     setFlipped(nextFlipped);
     if (nextFlipped && !dictionary()) {
@@ -129,22 +155,35 @@ function App() {
     }
   };
 
-  // ポインタ押下時点のx座標を記録。
   const onPointerDown = (event: PointerEvent) => {
+    // pointer capture により、指/マウスがカード外に出ても move/up を取り続ける。
+    // 裏面のテキスト上をなぞった場合でも同じ一連操作として扱える。
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     setStartX(event.clientX);
+    setDragDeltaX(0);
+    setIsDragging(true);
+    setDidSwipeOnThisPointer(false);
   };
 
-  // ポインタ解放時に移動量を評価し、閾値超過ならスワイプ判定。
-  const onPointerUp = (event: PointerEvent) => {
+  const onPointerMove = (event: PointerEvent) => {
     const firstX = startX();
-    if (firstX === null) return;
+    if (firstX === null || !isDragging()) return;
 
-    const deltaX = event.clientX - firstX;
-    const threshold = 50;
-    if (Math.abs(deltaX) >= threshold) {
+    // リアルタイム差分を保持してUIに反映。
+    setDragDeltaX(event.clientX - firstX);
+  };
+
+  const onPointerUp = () => {
+    const deltaX = dragDeltaX();
+
+    if (Math.abs(deltaX) >= SWIPE_THRESHOLD) {
+      setDidSwipeOnThisPointer(true);
       moveCard(deltaX > 0 ? "right" : "left");
     }
+
     setStartX(null);
+    setDragDeltaX(0);
+    setIsDragging(false);
   };
 
   onMount(() => {
@@ -161,10 +200,16 @@ function App() {
   return (
     <main class="app">
       <h1>WordLearn 2000</h1>
-      <p class="help">タップで詳細表示 / 左右スワイプで次のランダム単語</p>
+      <p class="help">
+        タップで詳細表示 / 左右スワイプで次のランダム単語（スワイプ距離は {SWIPE_THRESHOLD}px）
+      </p>
       <section
-        class={`card ${flipped() ? "flipped" : ""}`}
+        class={`card ${flipped() ? "flipped" : ""} ${isDragging() ? "dragging" : ""}`}
+        style={{
+          transform: `translateX(${cardTranslateX()}px) rotate(${cardRotateDeg()}deg)`
+        }}
         onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
         onClick={onFlip}
       >
         <Show when={flipped()} fallback={<h2 class="word">{currentWord().word}</h2>}>
@@ -181,6 +226,20 @@ function App() {
                 <strong>例文:</strong> {dictionary()?.example ?? "例文なし"}
               </p>
             </Show>
+          </div>
+        </Show>
+
+        <Show when={isDragging()}>
+          <div class="swipe-indicator">
+            <p>
+              {reachedSwipeThreshold()
+                ? "✅ ページめくり閾値到達: 指を離すとスワイプ確定"
+                : "📖 ページめくり中: さらに引くとスワイプに切り替わります"}
+            </p>
+            <p>
+              距離: {Math.round(Math.abs(dragDeltaX()))} / {SWIPE_THRESHOLD}px（
+              {Math.round(swipeProgress() * 100)}%）
+            </p>
           </div>
         </Show>
       </section>
