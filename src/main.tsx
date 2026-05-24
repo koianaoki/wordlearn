@@ -20,6 +20,11 @@ type DictionaryResult = {
   phonetic: string;
 };
 
+// Web Speech API の対応状態を UI で扱うための列挙型。
+// true/false の真偽値ではなく文字列リテラル型にすることで、
+// 将来的に "loading" などの中間状態を追加しても読みやすさを保てる。
+type SpeechSupportState = "supported" | "unsupported";
+
 // JSONを学習用配列として固定。
 // アプリ起動中に内容が変わらないため、定数として保持する。
 const ALL_WORDS = words as WordEntry[];
@@ -99,6 +104,12 @@ function App() {
   // 裏面表示時のAPI通信中フラグ。
   const [loading, setLoading] = createSignal(false);
 
+  // Web Speech API のサポート状態。初期値は未対応扱いにして、
+  // onMount 内の実環境判定後に supported へ更新する。
+  const [speechSupport, setSpeechSupport] = createSignal<SpeechSupportState>("unsupported");
+  // 音声読み上げ中かどうか。UIボタン文言と disable 条件に使う。
+  const [isSpeaking, setIsSpeaking] = createSignal(false);
+
   // スワイプ開始位置（x座標）と現在位置との差分。
   // 差分はカードの見た目（傾き・平行移動）と、スワイプ進捗表示に使う。
   const [startX, setStartX] = createSignal<number | null>(null);
@@ -121,6 +132,47 @@ function App() {
   // 閾値を超えた分の差分を表示するため、超過分(px)を算出する。
   const swipeExcessPx = createMemo(() => Math.max(0, Math.abs(dragDeltaX()) - SWIPE_THRESHOLD));
 
+  // 読み上げを停止する共通関数。
+  // 単語切替・コンポーネント破棄・ユーザー手動停止の3系統から呼び出すため、
+  // 停止処理を1か所へ集約して状態不整合を避ける。
+  const stopSpeech = () => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  };
+
+  // 現在表示単語を読み上げる。
+  // 非対応ブラウザではこの関数を実行しない設計だが、
+  // 念のため二重チェックして安全に no-op で抜ける。
+  const playSpeech = () => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+
+    // 既存キューをキャンセルして、常に「今の単語だけ」を読む。
+    // これにより連打時に古い単語が遅れて再生される問題を防止する。
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(currentWord().word);
+    utterance.lang = "en-US";
+    utterance.rate = 0.95;
+
+    // 再生開始・終了・エラー時にUI状態を同期する。
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // 再生ボタン押下時の挙動。
+  // 再生中なら停止、停止中なら再生にトグルする。
+  const onClickSpeechButton = () => {
+    if (isSpeaking()) {
+      stopSpeech();
+      return;
+    }
+    playSpeech();
+  };
+
   // 現在単語の辞書情報をロードする。
   const loadWordDetails = async () => {
     setLoading(true);
@@ -133,6 +185,9 @@ function App() {
   // direction は将来的なアニメーション制御拡張用に保持。
   const moveCard = (direction: "left" | "right") => {
     void direction;
+    // カード切り替え時は、前単語の読み上げを必ず停止する。
+    // ユーザー体験として「表示単語と音声がずれる」状態を防ぐ。
+    stopSpeech();
     const index = getRandomIndex(currentIndex());
     setCurrentIndex(index);
     // 単語切替時は必ず表面に戻し、前単語のAPI結果を破棄する。
@@ -188,6 +243,12 @@ function App() {
   };
 
   onMount(() => {
+    // 実行環境がブラウザかつ speechSynthesis を実装しているか判定する。
+    // この結果をそのまま再生ボタンの disabled 条件へつなげる。
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      setSpeechSupport("supported");
+    }
+
     // ドキュメント全体で pointerup を監視して、
     // カード外で指を離したケースも確実に拾う。
     document.addEventListener("pointerup", onPointerUp);
@@ -196,6 +257,8 @@ function App() {
   onCleanup(() => {
     // コンポーネント破棄時のイベントリーク防止。
     document.removeEventListener("pointerup", onPointerUp);
+    // 画面遷移やアンマウント時に読み上げだけ残らないよう停止する。
+    stopSpeech();
   });
 
   return (
@@ -256,6 +319,24 @@ function App() {
           </div>
         </Show>
       </section>
+
+      {/*
+        再生ボタンは「カード外」に配置して、
+        カードのタップ（表裏反転）ジェスチャーと操作領域を明確に分離する。
+      */}
+      <button
+        class="speak-button"
+        type="button"
+        disabled={speechSupport() === "unsupported"}
+        onClick={onClickSpeechButton}
+      >
+        {speechSupport() === "unsupported"
+          ? "このブラウザは音声再生に非対応です"
+          : isSpeaking()
+            ? "音声を停止"
+            : "単語を再生"}
+      </button>
+
       <p class="count">登録語数: {ALL_WORDS.length}語</p>
     </main>
   );
