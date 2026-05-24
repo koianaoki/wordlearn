@@ -1,0 +1,50 @@
+:root {
+  font-family: "Noto Sans JP", system-ui, sans-serif;
+  color: #1f2937;
+  background: #f3f4f6;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.help,
+.count {
+  color: #4b5563;
+}
+
+.card {
+  width: min(90vw, 420px);
+  min-height: 240px;
+  background: white;
+  border-radius: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  cursor: pointer;
+}
+
+.card.flipped {
+  border: 2px solid #2563eb;
+}
+
+.word {
+  font-size: 2.2rem;
+  margin: 0;
+}
+
+.details h2 {
+  margin-top: 0;
+}
