@@ -18,6 +18,7 @@ type WordEntry = {
 type DictionaryResult = {
   example: string;
   phonetic: string;
+  audioUrl: string | null;
 };
 
 // Web Speech API の対応状態を UI で扱うための列挙型。
@@ -71,6 +72,16 @@ async function fetchDictionary(word: string): Promise<DictionaryResult | null> {
       entry.phonetics?.find((p: { text?: string }) => p.text)?.text ||
       "発音情報なし";
 
+    // Free Dictionary API の音声は phonetics[].audio に入る。
+    // 空文字が混在するケースがあるため、最初に「実際に再生可能な文字列」を持つ要素だけを採用する。
+    // 先頭が // のURLは https 補完が必要なのでこの段階で正規化しておく。
+    const rawAudio = entry.phonetics?.find((p: { audio?: string }) => p.audio)?.audio ?? "";
+    const audioUrl = rawAudio
+      ? rawAudio.startsWith("//")
+        ? `https:${rawAudio}`
+        : rawAudio
+      : null;
+
     // 例文は meanings[].definitions[].example に散在しているため
     // 二重ループで先頭の例文を1件だけ採用する。
     const meanings = entry.meanings ?? [];
@@ -87,7 +98,7 @@ async function fetchDictionary(word: string): Promise<DictionaryResult | null> {
       }
     }
 
-    return { phonetic, example };
+    return { phonetic, example, audioUrl };
   } catch {
     // ネットワーク障害・CORS・JSON不正などはすべて null へ統一。
     return null;
@@ -109,6 +120,9 @@ function App() {
   const [speechSupport, setSpeechSupport] = createSignal<SpeechSupportState>("unsupported");
   // 音声読み上げ中かどうか。UIボタン文言と disable 条件に使う。
   const [isSpeaking, setIsSpeaking] = createSignal(false);
+  // 辞書APIの音声再生で使う Audio インスタンス。
+  // 単語切替時に古い再生を止める必要があるため、関数内ローカルではなく参照を保持する。
+  let dictionaryAudio: HTMLAudioElement | null = null;
 
   // スワイプ開始位置（x座標）と現在位置との差分。
   // 差分はカードの見た目（傾き・平行移動）と、スワイプ進捗表示に使う。
@@ -136,6 +150,15 @@ function App() {
   // 単語切替・コンポーネント破棄・ユーザー手動停止の3系統から呼び出すため、
   // 停止処理を1か所へ集約して状態不整合を避ける。
   const stopSpeech = () => {
+    // 辞書API音声を先に止める。
+    // SpeechSynthesis と同時に鳴ってしまう事故を避けるため、
+    // 「停止」は常に両方へ適用する共通処理として扱う。
+    if (dictionaryAudio) {
+      dictionaryAudio.pause();
+      dictionaryAudio.currentTime = 0;
+      dictionaryAudio = null;
+    }
+
     if (typeof window === "undefined" || !window.speechSynthesis) return;
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
@@ -145,6 +168,41 @@ function App() {
   // 非対応ブラウザではこの関数を実行しない設計だが、
   // 念のため二重チェックして安全に no-op で抜ける。
   const playSpeech = () => {
+    // まず辞書API音声を優先する。
+    // ネイティブに近い発音が手に入る場合はそちらを使い、
+    // URLが無い場合のみ従来のWeb Speech APIへフォールバックする。
+    const audioUrl = dictionary()?.audioUrl;
+    if (audioUrl) {
+      stopSpeech();
+      dictionaryAudio = new Audio(audioUrl);
+      dictionaryAudio.onplay = () => setIsSpeaking(true);
+      dictionaryAudio.onended = () => {
+        setIsSpeaking(false);
+        dictionaryAudio = null;
+      };
+      dictionaryAudio.onerror = () => {
+        // API音声の再生に失敗した時だけ、Web Speech APIへ自動フォールバックする。
+        // これにより音声URL切れ・CORS制約がある環境でも最低限の読み上げ体験を維持する。
+        dictionaryAudio = null;
+        setIsSpeaking(false);
+        playSpeechWithWebApi();
+      };
+      void dictionaryAudio.play().catch(() => {
+        // ユーザー操作直後でも端末ポリシーで拒否される場合があるため、
+        // Promise reject 時も同じくWeb Speechへフォールバックする。
+        dictionaryAudio = null;
+        setIsSpeaking(false);
+        playSpeechWithWebApi();
+      });
+      return;
+    }
+
+    playSpeechWithWebApi();
+  };
+
+  // Web Speech API による読み上げ専用処理。
+  // playSpeech 本体から分離し、辞書音声失敗時のフォールバック先を明確化する。
+  const playSpeechWithWebApi = () => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
 
     // 既存キューをキャンセルして、常に「今の単語だけ」を読む。
