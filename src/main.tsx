@@ -13,8 +13,6 @@ type WordEntry = {
   ja: string[];
 };
 
-const MACHINE_TRANSLATION_PREFIX = "技術英語:";
-
 // 辞書APIからUI表示に必要な最小情報だけを切り出した型。
 // 取得できない場合は呼び出し側でフォールバック文言を表示する。
 type DictionaryResult = {
@@ -25,48 +23,6 @@ type DictionaryResult = {
 // JSONを学習用配列として固定。
 // アプリ起動中に内容が変わらないため、定数として保持する。
 const ALL_WORDS = words as WordEntry[];
-
-
-// "技術英語: xxx" のような機械的な埋め草を除外して、
-// 単語ごとの日本語訳を優先表示する。
-const JA_LOOKUP = new Map<string, string>(
-  ALL_WORDS.flatMap((entry) =>
-    entry.ja
-      .map((ja) => ja.trim())
-      .filter((ja) => ja && !ja.startsWith(MACHINE_TRANSLATION_PREFIX))
-      .map((ja) => [entry.word.toLowerCase(), ja] as const),
-  ),
-);
-
-function normalizePart(part: string): string {
-  return part.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function splitWordParts(word: string): string[] {
-  return word
-    .split(/[-_\s]+/)
-    .map((part) => normalizePart(part))
-    .filter(Boolean);
-}
-
-function getJapaneseTranslations(entry: WordEntry): string[] {
-  const explicit = entry.ja
-    .map((ja) => ja.trim())
-    .filter((ja) => ja && !ja.startsWith(MACHINE_TRANSLATION_PREFIX));
-
-  if (explicit.length > 0) {
-    return explicit;
-  }
-
-  const parts = splitWordParts(entry.word);
-  if (parts.length > 1) {
-    const composed = parts.map((part) => JA_LOOKUP.get(part) ?? part);
-    return [composed.join(" / ")];
-  }
-
-  const normalized = normalizePart(entry.word);
-  return [JA_LOOKUP.get(normalized) ?? entry.word];
-}
 
 // ランダムに単語インデックスを返す関数。
 // 直前と同じ単語を避けたいので exclude を受け取り、
@@ -215,7 +171,7 @@ function App() {
           <div class="details">
             <h2>{currentWord().word}</h2>
             <p>
-              <strong>日本語訳:</strong> {getJapaneseTranslations(currentWord()).join(" / ")}
+              <strong>日本語訳:</strong> {currentWord().ja.join(" / ")}
             </p>
             <Show when={!loading()} fallback={<p>辞書APIから取得中...</p>}>
               <p>
