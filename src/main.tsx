@@ -26,7 +26,7 @@ const ALL_WORDS = words as WordEntry[];
 
 // スワイプ成立に必要な距離。
 // 以前より長めにして、誤操作を減らす。
-const SWIPE_THRESHOLD = 110;
+const SWIPE_THRESHOLD = 80;
 
 // ランダムに単語インデックスを返す関数。
 // 直前と同じ単語を避けたいので exclude を受け取り、
@@ -114,11 +114,12 @@ function App() {
 
   // 表示するカード移動量は、極端に遠くまで引っ張っても見た目が破綻しないよう上限を設ける。
   const cardTranslateX = createMemo(() => Math.max(-140, Math.min(140, dragDeltaX())));
-  // 左右に引いた方向へ軽く回転させ、「ページをめくっている感」を強める。
-  const cardRotateDeg = createMemo(() => cardTranslateX() / 14);
+  // カードは回転させず、水平移動のみで追従させる。
   // 進捗率は 0.0〜1.0 に丸め、しきい値到達の判定にも使う。
   const swipeProgress = createMemo(() => Math.min(Math.abs(dragDeltaX()) / SWIPE_THRESHOLD, 1));
   const reachedSwipeThreshold = createMemo(() => swipeProgress() >= 1);
+  // 閾値を超えた分の差分を表示するため、超過分(px)を算出する。
+  const swipeExcessPx = createMemo(() => Math.max(0, Math.abs(dragDeltaX()) - SWIPE_THRESHOLD));
 
   // 現在単語の辞書情報をロードする。
   const loadWordDetails = async () => {
@@ -206,7 +207,7 @@ function App() {
       <section
         class={`card ${flipped() ? "flipped" : ""} ${isDragging() ? "dragging" : ""}`}
         style={{
-          transform: `translateX(${cardTranslateX()}px) rotate(${cardRotateDeg()}deg)`
+          transform: `translateX(${cardTranslateX()}px)`
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -233,13 +234,25 @@ function App() {
           <div class="swipe-indicator">
             <p>
               {reachedSwipeThreshold()
-                ? "✅ ページめくり閾値到達: 指を離すとスワイプ確定"
-                : "📖 ページめくり中: さらに引くとスワイプに切り替わります"}
+                ? "✅ スワイプ閾値到達: 指を離すとスワイプ確定"
+                : "➡️ 水平スワイプ中: さらに引くとスワイプ確定"}
             </p>
             <p>
               距離: {Math.round(Math.abs(dragDeltaX()))} / {SWIPE_THRESHOLD}px（
               {Math.round(swipeProgress() * 100)}%）
             </p>
+            <Show when={reachedSwipeThreshold()}>
+              {/* スワイプ成立時に、閾値をどれだけ超えたか差分を明示する。 */}
+              <p>
+                閾値超過差分: +{Math.round(swipeExcessPx())}px
+              </p>
+            </Show>
+            <Show when={!reachedSwipeThreshold()}>
+              {/* まだ成立していない間は、成立までの残り差分を表示する。 */}
+              <p>
+                成立まであと: {Math.max(0, SWIPE_THRESHOLD - Math.round(Math.abs(dragDeltaX())))}px
+              </p>
+            </Show>
           </div>
         </Show>
       </section>
