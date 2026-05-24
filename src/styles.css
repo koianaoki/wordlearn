@@ -77,3 +77,22 @@ body {
 .swipe-indicator p + p {
   margin-top: 0.2rem;
 }
+
+
+.speak-button {
+  border: none;
+  border-radius: 9999px;
+  background: #1d4ed8;
+  color: #ffffff;
+  padding: 0.75rem 1.1rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(29, 78, 216, 0.28);
+}
+
+.speak-button:disabled {
+  background: #9ca3af;
+  box-shadow: none;
+  cursor: not-allowed;
+}
