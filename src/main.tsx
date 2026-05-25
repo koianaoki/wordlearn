@@ -34,18 +34,30 @@ const ALL_WORDS = words as WordEntry[];
 // 以前より長めにして、誤操作を減らす。
 const SWIPE_THRESHOLD = 80;
 
+// localStorage に保存する「分かった単語ID一覧」のキー。
+// 将来スキーマ変更する際に衝突しないよう、アプリ名プレフィックス付きで固定する。
+const KNOWN_WORD_IDS_STORAGE_KEY = "wordlearn:knownWordIds";
+
 // ランダムに単語インデックスを返す関数。
 // 直前と同じ単語を避けたいので exclude を受け取り、
 // 一致した場合は再抽選する。
-function getRandomIndex(exclude?: number): number {
-  // 単語数0/1件のときは再抽選の意味がないため0固定。
-  if (ALL_WORDS.length <= 1) {
-    return 0;
+function getRandomIndex(exclude?: number, candidateIndices?: number[]): number {
+  // 候補配列が渡された場合はそれを優先し、未指定時は全単語インデックスを候補とする。
+  // 「分かった単語を除外した集合」から抽選したい場面があるため、候補を外から注入できる設計にする。
+  const pool =
+    candidateIndices && candidateIndices.length > 0
+      ? candidateIndices
+      : ALL_WORDS.map((_, index) => index);
+
+  // 候補が1件以下なら再抽選できないため、その1件（または0）を返す。
+  // 単語数が極端に少ない環境でも while ループが無限にならないようにする。
+  if (pool.length <= 1) {
+    return pool[0] ?? 0;
   }
 
-  let index = Math.floor(Math.random() * ALL_WORDS.length);
-  while (index === exclude) {
-    index = Math.floor(Math.random() * ALL_WORDS.length);
+  let index = pool[Math.floor(Math.random() * pool.length)];
+  while (index === exclude && pool.length > 1) {
+    index = pool[Math.floor(Math.random() * pool.length)];
   }
   return index;
 }
@@ -105,9 +117,49 @@ async function fetchDictionary(word: string): Promise<DictionaryResult | null> {
   }
 }
 
+
+// localStorage から「分かった単語ID集合」を読み込む。
+// 破損データや非配列が入っていた場合は空集合へフォールバックし、UIが壊れないよう守る。
+function loadKnownWordIdsFromStorage(): Set<number> {
+  if (typeof window === "undefined") {
+    return new Set<number>();
+  }
+
+  try {
+    const raw = window.localStorage.getItem(KNOWN_WORD_IDS_STORAGE_KEY);
+    if (!raw) {
+      return new Set<number>();
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set<number>();
+    }
+
+    return new Set<number>(parsed.filter((id): id is number => Number.isInteger(id)));
+  } catch {
+    return new Set<number>();
+  }
+}
+
+// localStorage へ「分かった単語ID集合」を保存する。
+// 例外が起きても学習体験自体は継続できるよう、保存失敗は握りつぶしてUIを止めない。
+function saveKnownWordIdsToStorage(knownWordIds: Set<number>) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(KNOWN_WORD_IDS_STORAGE_KEY, JSON.stringify(Array.from(knownWordIds)));
+  } catch {
+    // 保存失敗時は何もしない（プライベートモードや容量制限を想定）。
+  }
+}
+
 function App() {
   // 現在表示中の単語インデックス。
-  const [currentIndex, setCurrentIndex] = createSignal(getRandomIndex());
+  const [knownWordIds, setKnownWordIds] = createSignal<Set<number>>(loadKnownWordIdsFromStorage());
+  const [currentIndex, setCurrentIndex] = createSignal(getRandomIndex(undefined, ALL_WORDS.flatMap((entry, index) => (!knownWordIds().has(entry.id) ? [index] : []))));
   // カード表裏フラグ。false=表（単語のみ）, true=裏（詳細）
   const [flipped, setFlipped] = createSignal(false);
   // API取得結果。未取得または失敗時は null。
@@ -140,6 +192,11 @@ function App() {
 
   // 現在インデックスから表示単語を導出。
   const currentWord = createMemo(() => ALL_WORDS[currentIndex()]);
+  // 未習得（=まだ分かっていない）単語のインデックス配列。
+  // ランダム抽選は常にこの配列を母集団にして、既習得単語の再表示を避ける。
+  const unknownIndices = createMemo(() =>
+    ALL_WORDS.flatMap((entry, index) => (!knownWordIds().has(entry.id) ? [index] : []))
+  );
 
   // 表示するカード移動量は、極端に遠くまで引っ張っても見た目が破綻しないよう上限を設ける。
   const cardTranslateX = createMemo(() => Math.max(-140, Math.min(140, dragDeltaX())));
@@ -278,7 +335,7 @@ function App() {
     // カード切り替え時は、前単語の読み上げを必ず停止する。
     // ユーザー体験として「表示単語と音声がずれる」状態を防ぐ。
     stopAllSpeech();
-    const index = getRandomIndex(currentIndex());
+    const index = getRandomIndex(currentIndex(), unknownIndices());
     setCurrentIndex(index);
     // 単語切替時は必ず表面に戻し、前単語のAPI結果を破棄する。
     setFlipped(false);
@@ -360,6 +417,40 @@ function App() {
     // 画面遷移やアンマウント時に読み上げだけ残らないよう停止する。
     stopAllSpeech();
   });
+
+
+  // 現在の単語を「分かった」として記録し、次回抽選対象から除外する。
+  // 除外後は未習得候補の中から次単語へ進める。
+  const markCurrentWordAsKnown = () => {
+    const targetWord = currentWord();
+    const nextKnownWordIds = new Set<number>(knownWordIds());
+    nextKnownWordIds.add(targetWord.id);
+    setKnownWordIds(nextKnownWordIds);
+    saveKnownWordIdsToStorage(nextKnownWordIds);
+
+    const remainingUnknownIndices = ALL_WORDS.flatMap((entry, index) => (!nextKnownWordIds.has(entry.id) ? [index] : []));
+
+    // 全単語を学習済みにした場合は現在カードを維持し、完了メッセージのみ表示する。
+    if (remainingUnknownIndices.length === 0) {
+      setFlipped(false);
+      return;
+    }
+
+    stopAllSpeech();
+    const index = getRandomIndex(currentIndex(), remainingUnknownIndices);
+    setCurrentIndex(index);
+    setFlipped(false);
+    setDictionary(null);
+    void loadWordDetails(ALL_WORDS[index].word);
+  };
+
+  // 学習状態を初期化し、すべての単語を再び抽選対象へ戻す。
+  // localStorage のみ削除し、単語データ自体は変更しない。
+  const resetKnownWords = () => {
+    const emptySet = new Set<number>();
+    setKnownWordIds(emptySet);
+    saveKnownWordIdsToStorage(emptySet);
+  };
 
   return (
     <main class="app">
@@ -453,7 +544,19 @@ function App() {
         </button>
       </div>
 
-      <p class="count">登録語数: {ALL_WORDS.length}語</p>
+      <div class="learning-actions">
+        <button class="action-button known" type="button" onClick={markCurrentWordAsKnown}>
+          この単語は分かった
+        </button>
+        <button class="action-button reset" type="button" onClick={resetKnownWords}>
+          学習状態をリセット
+        </button>
+      </div>
+
+      <p class="count">登録語数: {ALL_WORDS.length}語 / 残り: {unknownIndices().length}語</p>
+      <Show when={unknownIndices().length === 0}>
+        <p class="help">🎉 すべての単語を「分かった」にしました。リセットで再開できます。</p>
+      </Show>
     </main>
   );
 }
