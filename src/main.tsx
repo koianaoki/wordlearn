@@ -248,10 +248,25 @@ function App() {
     playDictionaryAudio();
   };
 
-  // 現在単語の辞書情報をロードする。
-  const loadWordDetails = async () => {
+  // 非同期レスポンスの競合を防ぐための連番トークン。
+  // 単語を切り替えたあとに古いリクエストが遅れて返ってきても、
+  // この番号が一致しない限り state へ反映しないことで表示の取り違えを防ぐ。
+  let dictionaryRequestId = 0;
+
+  // 指定単語の辞書情報をロードする。
+  // user-trigger(タップ)だけでなく、単語表示直後の先読みでも使えるよう
+  // 引数で対象単語を受け取る設計にしている。
+  const loadWordDetails = async (word: string) => {
+    const requestId = ++dictionaryRequestId;
     setLoading(true);
-    const result = await fetchDictionary(currentWord().word);
+    const result = await fetchDictionary(word);
+
+    // 最新リクエスト以外は破棄する。
+    // これによりスワイプ連打時でも「直前の単語のAPI結果が混ざる」問題を防止する。
+    if (requestId !== dictionaryRequestId) {
+      return;
+    }
+
     setDictionary(result);
     setLoading(false);
   };
@@ -268,6 +283,10 @@ function App() {
     // 単語切替時は必ず表面に戻し、前単語のAPI結果を破棄する。
     setFlipped(false);
     setDictionary(null);
+
+    // カードを開く前から辞書情報を先読みして、
+    // 裏面表示や辞書音声ボタンの待ち時間を最小化する。
+    void loadWordDetails(ALL_WORDS[index].word);
   };
 
   // タップ時に表裏を切り替える。
@@ -281,8 +300,10 @@ function App() {
 
     const nextFlipped = !flipped();
     setFlipped(nextFlipped);
-    if (nextFlipped && !dictionary()) {
-      await loadWordDetails();
+
+    // 念のためのフォールバック: 先読みが未完了のまま裏面を開いた場合だけ取得する。
+    if (nextFlipped && !dictionary() && !loading()) {
+      await loadWordDetails(currentWord().word);
     }
   };
 
@@ -327,6 +348,10 @@ function App() {
     // ドキュメント全体で pointerup を監視して、
     // カード外で指を離したケースも確実に拾う。
     document.addEventListener("pointerup", onPointerUp);
+
+    // 初期表示単語もタップ前に辞書APIを先読みしておく。
+    // これにより「カードを開かないと辞書音声が使えない」状態を解消する。
+    void loadWordDetails(currentWord().word);
   });
 
   onCleanup(() => {
@@ -415,18 +440,16 @@ function App() {
         <button
           class="speak-button dictionary"
           type="button"
-          disabled={!flipped() || loading() || !dictionary()?.audioUrl}
+          disabled={loading() || !dictionary()?.audioUrl}
           onClick={onClickDictionaryAudioButton}
         >
-          {!flipped()
-            ? "カードを開くと辞書音声を準備"
-            : loading()
-              ? "辞書音声を読み込み中..."
-              : !dictionary()?.audioUrl
-                ? "辞書音声データなし"
-                : isDictionarySpeaking()
-                  ? "辞書音声を停止"
-                  : "辞書音声を再生"}
+          {loading()
+            ? "辞書音声を読み込み中..."
+            : !dictionary()?.audioUrl
+              ? "辞書音声データなし"
+              : isDictionarySpeaking()
+                ? "辞書音声を停止"
+                : "辞書音声を再生"}
         </button>
       </div>
 
