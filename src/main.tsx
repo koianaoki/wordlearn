@@ -118,8 +118,12 @@ function App() {
   // Web Speech API のサポート状態。初期値は未対応扱いにして、
   // onMount 内の実環境判定後に supported へ更新する。
   const [speechSupport, setSpeechSupport] = createSignal<SpeechSupportState>("unsupported");
-  // 音声読み上げ中かどうか。UIボタン文言と disable 条件に使う。
-  const [isSpeaking, setIsSpeaking] = createSignal(false);
+  // Web Speech API 側の読み上げ中フラグ。
+  // Free Dictionary 音声とボタンを分離したため、状態も個別管理にする。
+  const [isWebSpeechSpeaking, setIsWebSpeechSpeaking] = createSignal(false);
+  // Free Dictionary 音声の再生中フラグ。
+  // 再生開始/停止ボタンの文言切り替えに使う。
+  const [isDictionarySpeaking, setIsDictionarySpeaking] = createSignal(false);
   // 辞書APIの音声再生で使う Audio インスタンス。
   // 単語切替時に古い再生を止める必要があるため、関数内ローカルではなく参照を保持する。
   let dictionaryAudio: HTMLAudioElement | null = null;
@@ -149,61 +153,64 @@ function App() {
   // 読み上げを停止する共通関数。
   // 単語切替・コンポーネント破棄・ユーザー手動停止の3系統から呼び出すため、
   // 停止処理を1か所へ集約して状態不整合を避ける。
-  const stopSpeech = () => {
-    // 辞書API音声を先に止める。
-    // SpeechSynthesis と同時に鳴ってしまう事故を避けるため、
-    // 「停止」は常に両方へ適用する共通処理として扱う。
+  const stopDictionaryAudio = () => {
+    // 辞書API音声の停止処理。
+    // Audio インスタンスを破棄して、次の単語で古い再生状態を引き継がないようにする。
     if (dictionaryAudio) {
       dictionaryAudio.pause();
       dictionaryAudio.currentTime = 0;
       dictionaryAudio = null;
     }
-
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
+    setIsDictionarySpeaking(false);
   };
 
-  // 現在表示単語を読み上げる。
-  // 非対応ブラウザではこの関数を実行しない設計だが、
-  // 念のため二重チェックして安全に no-op で抜ける。
-  const playSpeech = () => {
-    // まず辞書API音声を優先する。
-    // ネイティブに近い発音が手に入る場合はそちらを使い、
-    // URLが無い場合のみ従来のWeb Speech APIへフォールバックする。
+  // Web Speech API の読み上げ停止処理。
+  // ボタン分離後も単語切替やアンマウント時に確実に停止するため共通化する。
+  const stopWebSpeech = () => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    setIsWebSpeechSpeaking(false);
+  };
+
+  // 両系統の音声を一括停止するヘルパー。
+  // 単語切替時は必ずこれを使い、表示単語と音声が食い違わないよう保証する。
+  const stopAllSpeech = () => {
+    stopDictionaryAudio();
+    stopWebSpeech();
+  };
+
+  // Free Dictionary API の音声を再生する。
+  // ここではフォールバックせず、辞書音声ボタン専用の処理として分離する。
+  const playDictionaryAudio = () => {
     const audioUrl = dictionary()?.audioUrl;
-    if (audioUrl) {
-      stopSpeech();
-      dictionaryAudio = new Audio(audioUrl);
-      dictionaryAudio.onplay = () => setIsSpeaking(true);
-      dictionaryAudio.onended = () => {
-        setIsSpeaking(false);
-        dictionaryAudio = null;
-      };
-      dictionaryAudio.onerror = () => {
-        // API音声の再生に失敗した時だけ、Web Speech APIへ自動フォールバックする。
-        // これにより音声URL切れ・CORS制約がある環境でも最低限の読み上げ体験を維持する。
-        dictionaryAudio = null;
-        setIsSpeaking(false);
-        playSpeechWithWebApi();
-      };
-      void dictionaryAudio.play().catch(() => {
-        // ユーザー操作直後でも端末ポリシーで拒否される場合があるため、
-        // Promise reject 時も同じくWeb Speechへフォールバックする。
-        dictionaryAudio = null;
-        setIsSpeaking(false);
-        playSpeechWithWebApi();
-      });
+    if (!audioUrl) {
       return;
     }
 
-    playSpeechWithWebApi();
+    // Web Speech と同時再生しないよう、辞書音声開始時に相手側を止める。
+    stopWebSpeech();
+    stopDictionaryAudio();
+    dictionaryAudio = new Audio(audioUrl);
+    dictionaryAudio.onplay = () => setIsDictionarySpeaking(true);
+    dictionaryAudio.onended = () => {
+      setIsDictionarySpeaking(false);
+      dictionaryAudio = null;
+    };
+    dictionaryAudio.onerror = () => {
+      dictionaryAudio = null;
+      setIsDictionarySpeaking(false);
+    };
+    void dictionaryAudio.play().catch(() => {
+      dictionaryAudio = null;
+      setIsDictionarySpeaking(false);
+    });
   };
 
   // Web Speech API による読み上げ専用処理。
-  // playSpeech 本体から分離し、辞書音声失敗時のフォールバック先を明確化する。
   const playSpeechWithWebApi = () => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
+    // Web Speech 開始時は辞書音声を止め、常に単一音声だけが鳴る状態にする。
+    stopDictionaryAudio();
 
     // 既存キューをキャンセルして、常に「今の単語だけ」を読む。
     // これにより連打時に古い単語が遅れて再生される問題を防止する。
@@ -214,21 +221,31 @@ function App() {
     utterance.rate = 0.95;
 
     // 再生開始・終了・エラー時にUI状態を同期する。
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
+    utterance.onstart = () => setIsWebSpeechSpeaking(true);
+    utterance.onend = () => setIsWebSpeechSpeaking(false);
+    utterance.onerror = () => setIsWebSpeechSpeaking(false);
 
     window.speechSynthesis.speak(utterance);
   };
 
-  // 再生ボタン押下時の挙動。
+  // Web Speech API ボタン押下時の挙動。
   // 再生中なら停止、停止中なら再生にトグルする。
-  const onClickSpeechButton = () => {
-    if (isSpeaking()) {
-      stopSpeech();
+  const onClickWebSpeechButton = () => {
+    if (isWebSpeechSpeaking()) {
+      stopWebSpeech();
       return;
     }
-    playSpeech();
+    playSpeechWithWebApi();
+  };
+
+  // Free Dictionary 音声ボタン押下時の挙動。
+  // 有効化済みのときだけ再生し、再生中なら停止する。
+  const onClickDictionaryAudioButton = () => {
+    if (isDictionarySpeaking()) {
+      stopDictionaryAudio();
+      return;
+    }
+    playDictionaryAudio();
   };
 
   // 現在単語の辞書情報をロードする。
@@ -245,7 +262,7 @@ function App() {
     void direction;
     // カード切り替え時は、前単語の読み上げを必ず停止する。
     // ユーザー体験として「表示単語と音声がずれる」状態を防ぐ。
-    stopSpeech();
+    stopAllSpeech();
     const index = getRandomIndex(currentIndex());
     setCurrentIndex(index);
     // 単語切替時は必ず表面に戻し、前単語のAPI結果を破棄する。
@@ -316,7 +333,7 @@ function App() {
     // コンポーネント破棄時のイベントリーク防止。
     document.removeEventListener("pointerup", onPointerUp);
     // 画面遷移やアンマウント時に読み上げだけ残らないよう停止する。
-    stopSpeech();
+    stopAllSpeech();
   });
 
   return (
@@ -382,18 +399,36 @@ function App() {
         再生ボタンは「カード外」に配置して、
         カードのタップ（表裏反転）ジェスチャーと操作領域を明確に分離する。
       */}
-      <button
-        class="speak-button"
-        type="button"
-        disabled={speechSupport() === "unsupported"}
-        onClick={onClickSpeechButton}
-      >
-        {speechSupport() === "unsupported"
-          ? "このブラウザは音声再生に非対応です"
-          : isSpeaking()
-            ? "音声を停止"
-            : "単語を再生"}
-      </button>
+      <div class="speak-buttons">
+        <button
+          class="speak-button"
+          type="button"
+          disabled={speechSupport() === "unsupported"}
+          onClick={onClickWebSpeechButton}
+        >
+          {speechSupport() === "unsupported"
+            ? "Web Speech APIは非対応です"
+            : isWebSpeechSpeaking()
+              ? "Web Speechを停止"
+              : "Web Speechで再生"}
+        </button>
+        <button
+          class="speak-button dictionary"
+          type="button"
+          disabled={!flipped() || loading() || !dictionary()?.audioUrl}
+          onClick={onClickDictionaryAudioButton}
+        >
+          {!flipped()
+            ? "カードを開くと辞書音声を準備"
+            : loading()
+              ? "辞書音声を読み込み中..."
+              : !dictionary()?.audioUrl
+                ? "辞書音声データなし"
+                : isDictionarySpeaking()
+                  ? "辞書音声を停止"
+                  : "辞書音声を再生"}
+        </button>
+      </div>
 
       <p class="count">登録語数: {ALL_WORDS.length}語</p>
     </main>
